@@ -26,7 +26,7 @@ module.exports = {
   setupFiles: ['./jest/setup.ts'],
   setupFilesAfterEnv: ['./jest/setupFilesAfterEnv.ts'],
   transformIgnorePatterns: [
-    'node_modules/(?!(@supabase|isows|@react-native-google-signin|@flyerhq|@react-native|react-native|react-native-url-polyfill|uuid|react-native-reanimated|react-native-gesture-handler|react-native-vector-icons|react-native-image-viewing|react-native-parsed-text|@react-navigation/.*|@react-native-masked-view/masked-view|react-native-linear-gradient|react-native-picker-select|react-native-paper|react-native-keyboard-controller|react-native-drawer-layout|marked|react-native-code-highlighter|react-syntax-highlighter|trim-newlines|react-native-worklets)/)',
+    'node_modules/(?!(@supabase|isows|@react-native-google-signin|@flyerhq|@react-native|react-native|react-native-url-polyfill|uuid|react-native-reanimated|react-native-gesture-handler|react-native-vector-icons|react-native-image-viewing|react-native-parsed-text|@react-navigation/.*|@react-native-masked-view/masked-view|react-native-linear-gradient|react-native-picker-select|react-native-paper|react-native-keyboard-controller|react-native-drawer-layout|react-native-code-highlighter|react-native-enriched-markdown|react-syntax-highlighter|trim-newlines|react-native-worklets)/)',
   ],
   testMatch: [
     '**/__tests__/**/*.test.[jt]s?(x)',
@@ -61,6 +61,8 @@ module.exports = {
     '\\.svg': '<rootDir>/__mocks__/external/react-native-svg.js',
     'react-native-keychain':
       '<rootDir>/__mocks__/external/react-native-keychain.js',
+    'react-native-tcp-socket':
+      '<rootDir>/__mocks__/external/react-native-tcp-socket.ts',
     '@nozbe/watermelondb':
       '<rootDir>/__mocks__/external/@nozbe/watermelondb.js',
     '@nozbe/watermelondb/adapters/sqlite':
