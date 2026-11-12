@@ -110,12 +110,11 @@ android/android-build.log
 
 # Local Windows APK toolchains and reusable build caches
 /.build-tools/
+build-apk.cmd
+docs/local-apk/
+tools/
 
 # Dev-team workflow control-plane artefacts (story docs, designer asks,
 # screenshot inventories). Live in the dev-team repo and are sometimes
 # synced into the worktree for local reference; never committed here.
 workflows/
-
-build-apk.cmd
-docs/local-apk/
-tools/
