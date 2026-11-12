@@ -1,0 +1,77 @@
+// Local Windows compatibility and bounded resource use; app sources stay upstream.
+// Versions follow the installed React Native Gradle plugin after yarn install.
+gradle.beforeProject { project ->
+    // Init scripts also run in included builds, whose root is the Gradle plugin.
+    def repoRoot = System.getenv('POCKETPAL_REPO_ROOT')
+    if (!repoRoot) {
+        throw new GradleException('POCKETPAL_REPO_ROOT must name the application checkout.')
+    }
+    def versionFile = new File(repoRoot,
+        'node_modules/@react-native/gradle-plugin/gradle/libs.versions.toml')
+    if (!versionFile.isFile()) {
+        throw new GradleException("Cannot read ${versionFile}; install dependencies first.")
+    }
+    def versionText = versionFile.getText('UTF-8')
+    def agpMatch = versionText =~ /(?m)^agp\s*=\s*"([^"]+)"\s*$/
+    def kotlinMatch = versionText =~ /(?m)^kotlin\s*=\s*"([^"]+)"\s*$/
+    if (!agpMatch.find() || !kotlinMatch.find()) {
+        throw new GradleException('Cannot derive AGP/Kotlin versions from the React Native Gradle plugin.')
+    }
+    def agpVersion = agpMatch.group(1)
+    def kotlinVersion = kotlinMatch.group(1)
+    project.buildscript.configurations.configureEach {
+        resolutionStrategy.force(
+            'com.android.tools.build:gradle:' + agpVersion,
+            'org.jetbrains.kotlin:kotlin-gradle-plugin:' + kotlinVersion,
+        )
+    }
+    def configureAndroid = {
+        def android = project.extensions.getByName('android')
+        if (!project.rootProject.ext.has('ndkVersion')) {
+            throw new GradleException('The root Android project must declare ndkVersion.')
+        }
+        android.ndkVersion = project.rootProject.ext.get('ndkVersion')
+        if (project.name == 'react-native-image-picker') {
+            project.extensions.getByName('androidComponents').finalizeDsl { dsl ->
+                dsl.compileSdk = project.rootProject.ext.compileSdkVersion
+            }
+        }
+        // Use the same long-path-capable Ninja for every native module.
+        // This also fixes zero output timestamps for the long llama target paths.
+        def configuredNinja = System.getenv('POCKETPAL_LOCAL_NINJA')
+        if (!configuredNinja) {
+            throw new GradleException('POCKETPAL_LOCAL_NINJA must name the local Windows Ninja executable.')
+        }
+        def localNinja = new File(configuredNinja)
+        if (!localNinja.isFile()) {
+            throw new GradleException("Cannot find local Ninja: ${localNinja}")
+        }
+        def ninjaPath = localNinja.canonicalPath.replace('\\', '/')
+        android.defaultConfig.externalNativeBuild.cmake.arguments.add(
+            ('-DCMAKE_MAKE_PROGRAM=' + ninjaPath).toString())
+        android.defaultConfig.externalNativeBuild.cmake.arguments.addAll([
+            '-DCMAKE_JOB_POOLS=compile=4;link=1',
+            '-DCMAKE_JOB_POOL_COMPILE=compile',
+            '-DCMAKE_JOB_POOL_LINK=link',
+        ])
+    }
+    project.pluginManager.withPlugin('com.android.application') { configureAndroid() }
+    project.pluginManager.withPlugin('com.android.library') { configureAndroid() }
+    project.pluginManager.withPlugin('com.facebook.react') {
+        if (project.path == ':app') {
+            project.extensions.getByName('react').extraPackagerArgs.addAll([
+                '--max-workers', '1',
+            ])
+            project.tasks.matching {
+                it.name.startsWith('createBundle') && it.name.endsWith('JsAndAssets')
+            }.configureEach { bundleTask ->
+                if (!bundleTask.hasProperty('sources')) {
+                    throw new GradleException('React Native bundle inputs changed; review the local cache exclusion.')
+                }
+                // Gradle's own transformed JS files change during this build.
+                // They are tooling, and must not invalidate the app JS bundle.
+                bundleTask.sources.exclude('.build-tools/**')
+            }
+        }
+    }
+}

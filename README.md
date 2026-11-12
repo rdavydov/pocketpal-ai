@@ -1,3 +1,11 @@
+> **PocketPal AI Community** is Roman Davydov's independent Android fork of
+> [PocketPal AI by Asghar Ghorbani and contributors](https://github.com/a-ghorbani/pocketpal-ai).
+> Its Android package is `io.github.rdavydov.pocketpalai`, with a separate app data
+> directory and launcher name. Local Plus features use the upstream-supported
+> source-build configuration. See [COMMUNITY.md](COMMUNITY.md) for changes,
+> build instructions, signing and service limitations. The upstream description
+> and attribution are retained below.
+
 <div align="center">
 
 <img src="src/assets/pocketpal-dark-v2.png" alt="PocketPal AI logo" width="120" />
