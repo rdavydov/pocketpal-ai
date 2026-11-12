@@ -87,7 +87,7 @@ android {
 
     namespace "com.pocketpal"
     defaultConfig {
-        applicationId "com.pocketpalai"
+        applicationId "io.github.rdavydov.pocketpalai"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 160
@@ -174,12 +174,12 @@ android {
     productFlavors {
         prod {
             dimension "distribution"
-            // applicationId stays as defaultConfig: com.pocketpalai
+            // applicationId stays as defaultConfig: io.github.rdavydov.pocketpalai
         }
         e2e {
             dimension "distribution"
             applicationIdSuffix ".e2e"
-            // Effective applicationId: com.pocketpalai.e2e
+            // Effective applicationId: io.github.rdavydov.pocketpalai.e2e
             // Separate sandbox; installs side-by-side with prod.
         }
     }
