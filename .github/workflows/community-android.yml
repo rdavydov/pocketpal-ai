@@ -112,6 +112,7 @@ jobs:
         env:
           ARTIFACT_NAME: ${{ inputs.artifact_name || 'community-apk' }}
         run: |
+          mkdir -p build/apk/ci/logs
           node tools/apk/android-apk.mjs metadata > "$RUNNER_TEMP/android-metadata.json"
           node --input-type=module <<'NODE'
           import fs from 'node:fs';
@@ -122,9 +123,16 @@ jobs:
           NODE
       - name: Install the SDK versions declared by the source
         run: |
-          read -r platform tools ndk < <(node -e "const m=require(process.env.RUNNER_TEMP+'/android-metadata.json'); console.log(m.compileSdk,m.buildToolsVersion,m.ndkVersion)")
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
-            "platforms;android-$platform" "build-tools;$tools" "ndk;$ndk" 'cmake;3.22.1'
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --list --include_obsolete --channel=0 > build/apk/ci/logs/sdk-packages.txt
+          node tools/apk/android-apk.mjs sdk-packages --list-file build/apk/ci/logs/sdk-packages.txt > "$RUNNER_TEMP/sdk-install.json"
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import {spawnSync} from 'node:child_process';
+          const packages = JSON.parse(fs.readFileSync(`${process.env.RUNNER_TEMP}/sdk-install.json`, 'utf8'));
+          console.log('Installing declared SDK packages:', packages);
+          const result = spawnSync(`${process.env.ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager`, Object.values(packages), {stdio:'inherit'});
+          if (result.error || result.status !== 0) throw result.error || new Error(`SDK installation failed: ${result.status}`);
+          NODE
           npm install --global yarn@1.22.22
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:

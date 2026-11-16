@@ -126,6 +126,68 @@ export function readMetadata(root = DEFAULT_ROOT) {
   };
 }
 
+export function resolveSdkPackages(list, metadata) {
+  const packages = new Set();
+  let inTable = false;
+  let foundTable = false;
+  for (const line of list.split(/\r?\n/)) {
+    const columns = line.split('|').map(column => column.trim());
+    if (
+      columns[0] === 'Path' &&
+      columns[1] === 'Version' &&
+      columns[2] === 'Description'
+    ) {
+      inTable = true;
+      foundTable = true;
+      continue;
+    }
+    if (/^[\s|-]+$/.test(line)) continue;
+    if (columns.length < 3) {
+      inTable = false;
+      continue;
+    }
+    if (!inTable) continue;
+    const [id, version, description] = columns;
+    // --channel=0 is the caller's contract, but a previously installed
+    // preview can still appear in its installed-packages table.
+    if (
+      /^\d+(?:\.\d+)*$/.test(version) &&
+      !/\b(?:alpha|beta|preview|rc)\d*\b/i.test(description)
+    ) {
+      packages.add(id);
+    }
+  }
+  if (!foundTable) {
+    throw new Error(
+      'Unsupported sdkmanager list format. Supply the complete output of sdkmanager --list --channel=0.',
+    );
+  }
+  const platforms = [
+    `platforms;android-${metadata.compileSdk}`,
+    `platforms;android-${metadata.compileSdk}.0`,
+  ];
+  const platform = platforms.find(id => packages.has(id));
+  if (!platform) {
+    throw new Error(
+      `Missing stable platform for compileSdk ${metadata.compileSdk}. Expected ${platforms.join(' or ')}; higher minor APIs and previews are not substitutes.`,
+    );
+  }
+  const selected = {
+    platform,
+    buildTools: `build-tools;${metadata.buildToolsVersion}`,
+    ndk: `ndk;${metadata.ndkVersion}`,
+    cmake: 'cmake;3.22.1',
+  };
+  for (const id of Object.values(selected)) {
+    if (!packages.has(id)) {
+      throw new Error(
+        `Missing stable SDK package '${id}' in sdkmanager --list --channel=0.`,
+      );
+    }
+  }
+  return selected;
+}
+
 export function parseBadging(text, expected) {
   const packageLine = singleMatch(
     text,
@@ -423,6 +485,7 @@ export function verifyApk(options) {
 
 const FLAGS = {
   '--root': 'root',
+  '--list-file': 'listFile',
   '--apk': 'apk',
   '--report-dir': 'reportDir',
   '--sdk-root': 'sdkRoot',
@@ -438,22 +501,32 @@ const FLAGS = {
 
 export function parseArgs(argv) {
   const [command, ...rest] = argv;
-  if (!['metadata', 'verify'].includes(command))
+  if (!['metadata', 'verify', 'sdk-packages'].includes(command))
     throw new Error(
-      'Usage: android-apk.mjs metadata [--root PATH] | verify --apk PATH --report-dir PATH [--sdk-root PATH --java-home PATH --python PATH --git-root PATH]',
+      'Usage: android-apk.mjs metadata [--root PATH] | sdk-packages --list-file PATH [--root PATH] | verify --apk PATH --report-dir PATH [--sdk-root PATH --java-home PATH --python PATH --git-root PATH]',
     );
   const options = {};
   for (let index = 0; index < rest.length; index += 2) {
     const flag = rest[index];
     const key = FLAGS[flag];
     const value = rest[index + 1];
-    if (!key || (command === 'metadata' && key !== 'root'))
+    if (
+      !key ||
+      (command === 'metadata' && key !== 'root') ||
+      (command === 'sdk-packages' && !['root', 'listFile'].includes(key)) ||
+      (command === 'verify' && key === 'listFile')
+    )
       throw new Error(`Unsupported ${command} argument: ${flag}`);
     if (options[key] !== undefined)
       throw new Error(`Repeated argument: ${flag}`);
     if (!value || value.startsWith('--'))
       throw new Error(`${flag} requires a value.`);
     options[key] = value;
+  }
+  if (command === 'sdk-packages' && !options.listFile) {
+    throw new Error(
+      'sdk-packages requires --list-file from sdkmanager --list --channel=0.',
+    );
   }
   return {command, options};
 }
@@ -464,8 +537,14 @@ if (
 ) {
   try {
     const {command, options} = parseArgs(process.argv.slice(2));
-    const result =
-      command === 'metadata' ? readMetadata(options.root) : verifyApk(options);
+    let result;
+    if (command === 'metadata') result = readMetadata(options.root);
+    else if (command === 'sdk-packages') {
+      result = resolveSdkPackages(
+        read(options.listFile),
+        readMetadata(options.root),
+      );
+    } else result = verifyApk(options);
     process.stdout.write(JSON.stringify(result, null, 2) + '\n');
   } catch (error) {
     console.error(error.message);

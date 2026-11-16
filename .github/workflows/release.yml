@@ -13,17 +13,18 @@ on:
           - build
           - check
           - preview
+          - verify-access
 
 permissions:
   contents: read
 
 concurrency:
-  group: community-release-${{ github.repository }}
+  group: community-release-${{ github.repository }}${{ inputs.mode == 'verify-access' && '-access-check' || '' }}
   cancel-in-progress: false
 
 jobs:
   prepare:
-    if: github.repository == 'rdavydov/pocketpal-ai' && (github.event_name == 'schedule' || inputs.mode != 'build')
+    if: github.repository == 'rdavydov/pocketpal-ai' && (github.event_name == 'schedule' || inputs.mode == 'check' || inputs.mode == 'preview')
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     outputs:
@@ -55,13 +56,66 @@ jobs:
 
   android:
     needs: prepare
-    if: ${{ !cancelled() && github.repository == 'rdavydov/pocketpal-ai' && (needs.prepare.result == 'skipped' || (needs.prepare.result == 'success' && needs.prepare.outputs.mode != 'no-update')) }}
+    if: ${{ !cancelled() && github.repository == 'rdavydov/pocketpal-ai' && ((needs.prepare.result == 'skipped' && inputs.mode == 'build') || (needs.prepare.result == 'success' && needs.prepare.outputs.mode != 'no-update')) }}
     uses: ./.github/workflows/community-android.yml
     with:
       source_ref: ${{ github.sha }}
       candidate_artifact: ${{ needs.prepare.result == 'success' && 'community-candidate' || '' }}
       artifact_name: community-apk
       run_quality: true
+
+  verify-access:
+    if: github.repository == 'rdavydov/pocketpal-ai' && github.event_name == 'workflow_dispatch' && inputs.mode == 'verify-access'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      # This explicit operator check uses only this workflow's revision, no candidate.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22.22.0'
+      - name: Select the configured publisher credential
+        id: auth
+        env:
+          RELEASE_TOKEN: ${{ secrets.COMMUNITY_RELEASE_TOKEN }}
+          APP_CLIENT_ID: ${{ vars.COMMUNITY_APP_CLIENT_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.COMMUNITY_APP_PRIVATE_KEY }}
+        run: |
+          if [ -n "$RELEASE_TOKEN" ]; then
+            echo 'method=pat' >> "$GITHUB_OUTPUT"
+          elif [ -n "$APP_CLIENT_ID" ] && [ -n "$APP_PRIVATE_KEY" ]; then
+            echo 'method=app' >> "$GITHUB_OUTPUT"
+          else
+            echo '::error::Configure COMMUNITY_RELEASE_TOKEN or the Community GitHub App'
+            exit 1
+          fi
+      - name: Create the optional App token
+        if: steps.auth.outputs.method == 'app'
+        id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.COMMUNITY_APP_CLIENT_ID }}
+          private-key: ${{ secrets.COMMUNITY_APP_PRIVATE_KEY }}
+          owner: rdavydov
+          repositories: pocketpal-ai
+          permission-contents: write
+          permission-workflows: write
+      - name: Verify publisher access using a disposable draft
+        env:
+          APP_TOKEN: ${{ secrets.COMMUNITY_RELEASE_TOKEN || steps.app.outputs.token }}
+        run: node tools/apk/community-release.mjs verify-access --root . --output "$RUNNER_TEMP/access-check"
+      - name: Retain the credential check report without credentials
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: community-access-check
+          path: ${{ runner.temp }}/access-check/
+          retention-days: 7
+          if-no-files-found: ignore
 
   publish:
     needs: [prepare, android]

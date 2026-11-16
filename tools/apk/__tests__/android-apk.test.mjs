@@ -3,8 +3,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {test} from 'node:test';
+import {fileURLToPath} from 'node:url';
 import {
   readMetadata,
+  resolveSdkPackages,
   parseBadging,
   assertDebugSigner,
   pemCertificates,
@@ -109,6 +111,149 @@ test('metadata rejects ambiguous duplicate version declarations', t => {
   assert.throws(() => readMetadata(root), /Expected one literal versionCode/);
 });
 
+const sdkMetadata = {
+  compileSdk: 37,
+  buildToolsVersion: '37.0.0',
+  ndkVersion: '27.3.13750724',
+};
+const sdkTools = [
+  ['build-tools;37.0.0', '37.0.0', 'Android SDK Build-Tools 37'],
+  ['ndk;27.3.13750724', '27.3.13750724', 'NDK (Side by side)'],
+  ['cmake;3.22.1', '3.22.1', 'CMake 3.22.1'],
+];
+const sdkList = rows =>
+  [
+    'Loading local repository...',
+    'Available Packages:',
+    '  Path | Version | Description',
+    '  ------- | ------- | -------',
+    ...rows.map(row => `  ${row.join(' | ')}`),
+  ].join('\n');
+
+test('SDK resolver supports an integer API package from the stable table', () => {
+  const result = resolveSdkPackages(
+    sdkList([
+      ['platforms;android-36', '2', 'Android SDK Platform 36'],
+      ...sdkTools,
+    ]),
+    {...sdkMetadata, compileSdk: 36},
+  );
+  assert.deepEqual(result, {
+    platform: 'platforms;android-36',
+    buildTools: 'build-tools;37.0.0',
+    ndk: 'ndk;27.3.13750724',
+    cmake: 'cmake;3.22.1',
+  });
+});
+
+test('SDK resolver chooses exact API 37.0 rather than a higher minor API', () => {
+  const result = resolveSdkPackages(
+    sdkList([
+      ['platforms;android-37.2', '1', 'Android SDK Platform 37.2'],
+      ['platforms;android-37.1', '1', 'Android SDK Platform 37.1'],
+      ['platforms;android-37.0', '1', 'Android SDK Platform 37'],
+      ...sdkTools,
+    ]),
+    sdkMetadata,
+  );
+  assert.equal(result.platform, 'platforms;android-37.0');
+});
+
+test('SDK resolver prefers the exact integer API ID when both forms exist', () => {
+  const result = resolveSdkPackages(
+    sdkList([
+      ['platforms;android-37.0', '1', 'Android SDK Platform 37'],
+      ['platforms;android-37', '2', 'Android SDK Platform 37'],
+      ...sdkTools,
+    ]),
+    sdkMetadata,
+  );
+  assert.equal(result.platform, 'platforms;android-37');
+});
+
+test('SDK resolver accepts installed tool packages and an available platform', () => {
+  const installed = [
+    'Installed packages:',
+    'Path | Version | Description | Location',
+    '---- | ------- | ----------- | --------',
+    ...sdkTools.map(row => [...row, `installed/${row[0]}`].join(' | ')),
+  ].join('\r\n');
+  const result = resolveSdkPackages(
+    installed +
+      '\r\n\r\n' +
+      sdkList([['platforms;android-37.0', '1', 'Android SDK Platform 37']]),
+    sdkMetadata,
+  );
+  assert.equal(result.platform, 'platforms;android-37.0');
+  assert.equal(result.ndk, 'ndk;27.3.13750724');
+});
+
+test('SDK resolver rejects preview-only API packages and higher minor substitutes', () => {
+  const list = sdkList([
+    ['platforms;android-37', '1 rc1', 'Android SDK Platform 37'],
+    ['platforms;android-37.0', '1', 'Android SDK Platform 37 (Beta)'],
+    ['platforms;android-37.2', '1', 'Android SDK Platform 37.2'],
+    ...sdkTools,
+  ]);
+  assert.throws(
+    () => resolveSdkPackages(list, sdkMetadata),
+    /Missing stable platform for compileSdk 37/,
+  );
+});
+
+for (const id of sdkTools.map(row => row[0])) {
+  test(`SDK resolver rejects missing pinned package ${id}`, () => {
+    const list = sdkList([
+      ['platforms;android-37.0', '1', 'Android SDK Platform 37'],
+      ...sdkTools.filter(row => row[0] !== id),
+    ]);
+    assert.throws(
+      () => resolveSdkPackages(list, sdkMetadata),
+      error => {
+        assert.match(error.message, /Missing stable SDK package/);
+        assert.ok(error.message.includes(id));
+        return true;
+      },
+    );
+  });
+}
+
+test('SDK resolver reports unsupported output instead of guessing package IDs', () => {
+  assert.throws(
+    () =>
+      resolveSdkPackages('Error: repository could not be loaded', sdkMetadata),
+    /Unsupported sdkmanager list format/,
+  );
+});
+
+test('SDK package CLI reads the current project and returns installable IDs as JSON', t => {
+  const {root, write} = fixture(t);
+  write(
+    'sdk-list.txt',
+    sdkList([
+      ['platforms;android-37.0', '1', 'Android SDK Platform 37'],
+      ...sdkTools,
+    ]),
+  );
+  const cli = new URL('../android-apk.mjs', import.meta.url);
+  const output = runChecked(process.execPath, [
+    fileURLToPath(cli),
+    'sdk-packages',
+    '--root',
+    root,
+    '--list-file',
+    path.join(root, 'sdk-list.txt'),
+  ]);
+  assert.deepEqual(JSON.parse(output), {
+    platform: 'platforms;android-37.0',
+    buildTools: 'build-tools;37.0.0',
+    ndk: 'ndk;27.3.13750724',
+    cmake: 'cmake;3.22.1',
+  });
+  assert.equal(readMetadata(root).compileSdk, 37);
+  assert.equal(readMetadata(root).minSdk, 24);
+});
+
 test('badging parses the actual manifest, including extra aapt fields and CRLF', () => {
   assert.deepEqual(parseBadging(badging.replaceAll('\n', '\r\n'), expected), {
     ...expected,
@@ -194,6 +339,15 @@ test('CLI rejects repeated flags, missing values and verify flags in metadata', 
   assert.throws(
     () => parseArgs(['metadata', '--apk', 'app.apk']),
     /Unsupported metadata argument/,
+  );
+  assert.deepEqual(parseArgs(['sdk-packages', '--list-file', 'SDK list.txt']), {
+    command: 'sdk-packages',
+    options: {listFile: 'SDK list.txt'},
+  });
+  assert.throws(() => parseArgs(['sdk-packages']), /requires --list-file/);
+  assert.throws(
+    () => parseArgs(['sdk-packages', '--apk', 'app.apk']),
+    /Unsupported sdk-packages argument/,
   );
 });
 

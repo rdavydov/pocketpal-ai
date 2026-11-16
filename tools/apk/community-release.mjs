@@ -1053,6 +1053,296 @@ export async function publishRelease({
   };
 }
 
+/** Exercise publisher capabilities using only an unpublished, run-scoped draft. */
+export async function verifyAccess({
+  root,
+  output,
+  appToken = process.env.APP_TOKEN,
+  runId = process.env.GITHUB_RUN_ID,
+  runAttempt = process.env.GITHUB_RUN_ATTEMPT,
+  github = new GitHub(appToken),
+}) {
+  if (!appToken)
+    throw new Error('APP_TOKEN is required for the publisher access check.');
+  runId = String(runId ?? '');
+  runAttempt = String(runAttempt ?? '');
+  if (!/^[1-9]\d{0,19}$/.test(runId) || !/^[1-9]\d{0,19}$/.test(runAttempt))
+    throw new Error(
+      'Publisher access check requires numeric GITHUB_RUN_ID and GITHUB_RUN_ATTEMPT.',
+    );
+  root = path.resolve(root);
+  output = path.resolve(output);
+  if (git(root, ['status', '--porcelain', '--untracked-files=no']).text)
+    throw new Error(
+      'Publisher access check requires an unchanged trusted checkout.',
+    );
+  const sourceCommit = requireSha(git(root, ['rev-parse', 'HEAD']).text);
+  const temporaryTag = `community-ci-check-${runId}-${runAttempt}`;
+  const marker = `<!-- pocketpal-community-ci-check:${runId}:${runAttempt}:${sourceCommit} -->`;
+  const probeFile = path.join(output, 'access-probe.json');
+  const reportFile = path.join(output, 'access-check.json');
+  const report = {
+    schemaVersion: 1,
+    repository: REPOSITORY,
+    sourceCommit,
+    temporaryTag,
+    passed: false,
+    verifiedContentsWrite: false,
+    workflowsPermissionExercised: false,
+    workflowFilesDifferFromMain: false,
+    draftCreated: false,
+    assetVerified: false,
+    cleanup: {
+      draftDeleted: false,
+      tagDeleted: false,
+      tagAbsent: false,
+      probeFileRemoved: false,
+      complete: false,
+    },
+  };
+  await fs.mkdir(output, {recursive: true});
+  let ownedDraftId;
+  let postAttempted = false;
+  let tagInitiallyAbsent = false;
+  let tagCreatedWithDraft = false;
+  let probeWritten = false;
+  let operationError;
+  const cleanupErrors = [];
+  try {
+    const main = await github.request(
+      'GET',
+      `repos/${REPOSITORY}/git/ref/heads/main`,
+    );
+    const mainSha = requireSha(main.object.sha);
+    if (
+      git(root, ['cat-file', '-e', `${mainSha}^{commit}`], {allowFailure: true})
+        .status !== 0
+    )
+      git(root, [
+        'fetch',
+        '--no-tags',
+        '--no-recurse-submodules',
+        `https://github.com/${REPOSITORY}.git`,
+        'refs/heads/main',
+      ]);
+    report.defaultBranchCommit = mainSha;
+    report.workflowFilesDifferFromMain = Boolean(
+      git(root, [
+        'diff',
+        '--name-only',
+        mainSha,
+        sourceCommit,
+        '--',
+        '.github/workflows/',
+      ]).text,
+    );
+    const prior = await github.request(
+      'GET',
+      `repos/${REPOSITORY}/releases/tags/${temporaryTag}`,
+      undefined,
+      {allow404: true},
+    );
+    if (prior)
+      throw new Error(
+        'Temporary access-check release name is already in use; refusing to reuse it.',
+      );
+    if (await tagCommit(github, temporaryTag))
+      throw new Error(
+        'Temporary access-check tag name is already in use; refusing to reuse it.',
+      );
+    tagInitiallyAbsent = true;
+    const probe =
+      JSON.stringify({
+        schemaVersion: 1,
+        repository: REPOSITORY,
+        sourceCommit,
+        runId,
+        runAttempt,
+        purpose: 'publisher-access-check',
+      }) + '\n';
+    await fs.writeFile(probeFile, probe, {flag: 'wx'});
+    probeWritten = true;
+    postAttempted = true;
+    report.workflowsPermissionExercised = report.workflowFilesDifferFromMain;
+    const draft = await github.request('POST', `repos/${REPOSITORY}/releases`, {
+      tag_name: temporaryTag,
+      target_commitish: sourceCommit,
+      name: `Community publisher access check ${runId}/${runAttempt}`,
+      body: `Temporary unpublished CI access check. This is not an application release.\n\n${marker}\n`,
+      draft: true,
+      prerelease: false,
+    });
+    if (
+      !Number.isSafeInteger(draft.id) ||
+      draft.id <= 0 ||
+      draft.tag_name !== temporaryTag ||
+      draft.draft !== true ||
+      draft.prerelease
+    )
+      throw new Error(
+        'GitHub did not create the expected unpublished access-check draft.',
+      );
+    ownedDraftId = draft.id;
+    report.draftCreated = true;
+    report.verifiedContentsWrite = true;
+    const draftTag = await tagCommit(github, temporaryTag);
+    if (draftTag && draftTag !== sourceCommit)
+      throw new Error(
+        'The temporary draft tag points to another commit; it will not be deleted.',
+      );
+    tagCreatedWithDraft = draftTag === sourceCommit;
+    const size = Buffer.byteLength(probe);
+    const asset = await github.request('POST', '', undefined, {
+      upload: {
+        id: draft.id,
+        file: probeFile,
+        name: 'access-probe.json',
+        label: `Publisher access check; source ${sourceCommit}`,
+        type: 'application/json',
+        size,
+      },
+    });
+    if (
+      !Number.isSafeInteger(asset.id) ||
+      asset.id <= 0 ||
+      asset.name !== 'access-probe.json' ||
+      asset.size !== size ||
+      asset.state !== 'uploaded'
+    )
+      throw new Error(
+        'The temporary publisher probe was not uploaded correctly.',
+      );
+    const verified = await github.request(
+      'GET',
+      `repos/${REPOSITORY}/releases/assets/${asset.id}`,
+    );
+    if (
+      verified.id !== asset.id ||
+      verified.name !== 'access-probe.json' ||
+      verified.size !== size ||
+      verified.state !== 'uploaded'
+    )
+      throw new Error(
+        'GitHub probe asset metadata differs from the uploaded report.',
+      );
+    report.assetVerified = true;
+    report.probeBytes = size;
+  } catch (error) {
+    operationError = redact(error.message, [appToken]);
+  } finally {
+    // If POST reached GitHub but its response was lost, discover only our marker.
+    if (!ownedDraftId && postAttempted && tagInitiallyAbsent) {
+      try {
+        const drafts = await github.releases();
+        const matching = drafts.filter(
+          item =>
+            item.tag_name === temporaryTag &&
+            String(item.body || '').includes(marker),
+        );
+        if (matching.length === 1) ownedDraftId = matching[0].id;
+      } catch (error) {
+        cleanupErrors.push(redact(error.message, [appToken]));
+      }
+    }
+    if (ownedDraftId) {
+      try {
+        const draft = await github.request(
+          'GET',
+          `repos/${REPOSITORY}/releases/${ownedDraftId}`,
+          undefined,
+          {allow404: true},
+        );
+        if (draft) {
+          if (
+            !draft.draft ||
+            draft.prerelease ||
+            draft.tag_name !== temporaryTag ||
+            draft.target_commitish !== sourceCommit ||
+            !String(draft.body || '').includes(marker)
+          )
+            throw new Error(
+              'Access-check draft changed or was published; refusing to delete it.',
+            );
+          await github.request(
+            'DELETE',
+            `repos/${REPOSITORY}/releases/${ownedDraftId}`,
+          );
+          if (
+            await github.request(
+              'GET',
+              `repos/${REPOSITORY}/releases/${ownedDraftId}`,
+              undefined,
+              {allow404: true},
+            )
+          )
+            throw new Error(
+              'GitHub still returns the temporary draft after deletion.',
+            );
+        }
+        report.cleanup.draftDeleted = true;
+      } catch (error) {
+        cleanupErrors.push(redact(error.message, [appToken]));
+      }
+    }
+    if (tagInitiallyAbsent && report.cleanup.draftDeleted) {
+      try {
+        const currentTag = await tagCommit(github, temporaryTag);
+        if (currentTag) {
+          if (!tagCreatedWithDraft || currentTag !== sourceCommit)
+            throw new Error(
+              'Temporary tag was not created by this draft or changed; it will not be deleted.',
+            );
+          const currentRelease = await github.request(
+            'GET',
+            `repos/${REPOSITORY}/releases/tags/${temporaryTag}`,
+            undefined,
+            {allow404: true},
+          );
+          if (currentRelease)
+            throw new Error(
+              'A release still uses the temporary tag; refusing to delete the tag.',
+            );
+          await github.request(
+            'DELETE',
+            `repos/${REPOSITORY}/git/refs/tags/${temporaryTag}`,
+          );
+          report.cleanup.tagDeleted = true;
+        }
+        if (await tagCommit(github, temporaryTag))
+          throw new Error(
+            'Temporary access-check tag still exists after cleanup.',
+          );
+        report.cleanup.tagAbsent = true;
+      } catch (error) {
+        cleanupErrors.push(redact(error.message, [appToken]));
+      }
+    }
+    try {
+      if (probeWritten) {
+        await fs.rm(probeFile, {force: true});
+        report.cleanup.probeFileRemoved = true;
+      }
+    } catch (error) {
+      cleanupErrors.push(error.message);
+    }
+    report.cleanup.complete =
+      cleanupErrors.length === 0 &&
+      (!ownedDraftId ||
+        (report.cleanup.draftDeleted && report.cleanup.tagAbsent));
+    if (cleanupErrors.length) report.cleanup.errors = cleanupErrors;
+    report.checkedAtUtc = new Date().toISOString();
+    report.passed =
+      !operationError && report.assetVerified && report.cleanup.complete;
+    if (operationError) report.error = operationError;
+    await fs.writeFile(reportFile, JSON.stringify(report, null, 2) + '\n');
+  }
+  if (!report.passed)
+    throw new Error(
+      `Publisher access check failed: ${operationError || cleanupErrors.join('; ') || 'incomplete cleanup'}. See access-check.json.`,
+    );
+  return report;
+}
+
 function parseArguments(values) {
   const result = {command: values.shift()};
   while (values.length) {
@@ -1074,6 +1364,8 @@ async function main() {
   let result;
   if (args.command === 'prepare' && args.output)
     result = await prepareRelease({root, output: args.output});
+  else if (args.command === 'verify-access' && args.output)
+    result = await verifyAccess({root, output: args.output});
   else if (args.command === 'restore' && args.input)
     result = await restoreCandidate({root, input: args.input});
   else if (
@@ -1090,7 +1382,7 @@ async function main() {
     });
   else
     throw new Error(
-      'Usage: community-release.mjs prepare --output DIR | restore --input DIR | publish --candidate DIR --artifacts DIR --smoke DIR [--root CHECKOUT]',
+      'Usage: community-release.mjs prepare --output DIR | restore --input DIR | publish --candidate DIR --artifacts DIR --smoke DIR | verify-access --output DIR [--root CHECKOUT]',
     );
   console.log(JSON.stringify(result, null, 2));
 }

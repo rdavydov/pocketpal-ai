@@ -16,6 +16,7 @@ import {
   validateArtifactSet,
   applyIdentity,
   GitHub,
+  verifyAccess,
 } from '../community-release.mjs';
 
 function run(root, args, allowFailure = false) {
@@ -162,6 +163,8 @@ class FakeGitHub {
     this.nextAsset = 20;
     this.failUploadOnce = false;
     this.failCreateOnce = false;
+    this.failProbeUploadOnce = false;
+    this.createDraftTag = false;
     this.latest = {
       tag_name: 'v1.1.0',
       draft: false,
@@ -245,9 +248,25 @@ class FakeGitHub {
         assets: [],
         html_url: `https://github.com/${REPOSITORY}/releases/tag/${body.tag_name}`,
       };
+      if (
+        this.createDraftTag &&
+        body.tag_name.startsWith('community-ci-check-')
+      )
+        bare([
+          'update-ref',
+          `refs/tags/${body.tag_name}`,
+          body.target_commitish,
+        ]);
       return structuredClone(this.release);
     }
     if (method === 'POST' && options.upload) {
+      if (
+        this.failProbeUploadOnce &&
+        options.upload.name === 'access-probe.json'
+      ) {
+        this.failProbeUploadOnce = false;
+        throw new Error('simulated probe upload failure');
+      }
       if (this.failUploadOnce && options.upload.name === 'build-info.json') {
         this.failUploadOnce = false;
         throw new Error('simulated network failure');
@@ -262,6 +281,32 @@ class FakeGitHub {
       };
       this.release.assets.push(asset);
       return structuredClone(asset);
+    }
+    if (
+      method === 'GET' &&
+      endpoint.startsWith(`repos/${REPOSITORY}/releases/assets/`)
+    )
+      return structuredClone(
+        this.release.assets.find(
+          asset => asset.id === Number(endpoint.split('/').at(-1)),
+        ) || null,
+      );
+    if (method === 'DELETE' && endpoint === `repos/${REPOSITORY}/releases/2`) {
+      this.release = null;
+      return null;
+    }
+    if (
+      method === 'DELETE' &&
+      endpoint.startsWith(
+        `repos/${REPOSITORY}/git/refs/tags/community-ci-check-`,
+      )
+    ) {
+      bare([
+        'update-ref',
+        '-d',
+        `refs/tags/${decodeURIComponent(endpoint.split('/').at(-1))}`,
+      ]);
+      return null;
     }
     if (
       method === 'DELETE' &&
@@ -662,4 +707,142 @@ test('read API errors redact a token rather than exposing response text', async 
     error =>
       error.message.includes('***') && !error.message.includes('secret-value'),
   );
+});
+
+async function accessFixture(t) {
+  const f = await fixture(t);
+  await write(
+    f.root,
+    '.github/workflows/access-check.yml',
+    'name: access check feature\n',
+  );
+  run(f.root, ['add', '.']);
+  run(f.root, ['commit', '-m', 'new controller workflow']);
+  f.accessSha = run(f.root, ['rev-parse', 'HEAD']).text;
+  run(f.root, ['push', 'origin', 'HEAD:refs/heads/access-fixture']);
+  f.accessOutput = path.join(f.temporary, 'access-report');
+  return f;
+}
+
+function accessOptions(f) {
+  return {
+    root: f.root,
+    output: f.accessOutput,
+    appToken: 'test-access-token',
+    github: f.github,
+    runId: '12345678',
+    runAttempt: '2',
+  };
+}
+
+test('publisher access probe exercises workflow commit and removes its draft, asset and optional tag', async t => {
+  const f = await accessFixture(t);
+  f.github.createDraftTag = true;
+  const result = await verifyAccess(accessOptions(f));
+  assert.equal(result.passed, true);
+  assert.equal(result.verifiedContentsWrite, true);
+  assert.equal(result.workflowsPermissionExercised, true);
+  assert.equal(result.sourceCommit, f.accessSha);
+  assert.equal(result.temporaryTag, 'community-ci-check-12345678-2');
+  assert.equal(result.assetVerified, true);
+  assert.deepEqual(result.cleanup, {
+    draftDeleted: true,
+    tagDeleted: true,
+    tagAbsent: true,
+    probeFileRemoved: true,
+    complete: true,
+  });
+  assert.equal(f.github.release, null);
+  assert.equal(
+    run(f.root, ['--git-dir', f.origin, 'rev-parse', 'main']).text,
+    f.baseSha,
+  );
+  assert.equal(run(f.root, ['rev-parse', 'HEAD']).text, f.accessSha);
+  assert.equal(
+    run(f.root, ['--git-dir', f.origin, 'rev-parse', 'community-v1.0.0']).text,
+    f.baseSha,
+  );
+  assert.ok(
+    f.github.calls
+      .filter(call => call.method !== 'GET')
+      .every(
+        call =>
+          call.endpoint === '' ||
+          call.endpoint.includes('/releases') ||
+          call.endpoint.endsWith(
+            '/git/refs/tags/community-ci-check-12345678-2',
+          ),
+      ),
+  );
+  await assert.rejects(
+    fs.stat(path.join(f.accessOutput, 'access-probe.json')),
+    /ENOENT/,
+  );
+  assert.equal(
+    JSON.parse(
+      await fs.readFile(path.join(f.accessOutput, 'access-check.json'), 'utf8'),
+    ).passed,
+    true,
+  );
+});
+
+test('publisher access probe cleans a draft after upload failure and writes a failed report', async t => {
+  const f = await accessFixture(t);
+  f.github.failProbeUploadOnce = true;
+  await assert.rejects(
+    verifyAccess(accessOptions(f)),
+    /simulated probe upload failure/,
+  );
+  assert.equal(f.github.release, null);
+  const report = JSON.parse(
+    await fs.readFile(path.join(f.accessOutput, 'access-check.json'), 'utf8'),
+  );
+  assert.equal(report.passed, false);
+  assert.equal(report.cleanup.draftDeleted, true);
+  assert.equal(report.cleanup.tagAbsent, true);
+  assert.equal(report.cleanup.complete, true);
+  assert.equal(
+    run(f.root, ['--git-dir', f.origin, 'rev-parse', 'main']).text,
+    f.baseSha,
+  );
+});
+
+test('publisher access on main reports that workflow-write was not exercised', async t => {
+  const f = await fixture(t);
+  f.accessOutput = path.join(f.temporary, 'access-report');
+  const result = await verifyAccess(accessOptions(f));
+  assert.equal(result.passed, true);
+  assert.equal(result.verifiedContentsWrite, true);
+  assert.equal(result.workflowFilesDifferFromMain, false);
+  assert.equal(result.workflowsPermissionExercised, false);
+  assert.equal(result.cleanup.tagAbsent, true);
+});
+
+test('publisher access never reuses or deletes an unrelated existing draft', async t => {
+  const f = await accessFixture(t);
+  f.github.release = {
+    id: 2,
+    tag_name: 'community-ci-check-12345678-2',
+    draft: true,
+    prerelease: false,
+    target_commitish: f.accessSha,
+    body: 'Unrelated draft',
+    assets: [],
+  };
+  await assert.rejects(verifyAccess(accessOptions(f)), /already in use/);
+  assert.equal(f.github.release.body, 'Unrelated draft');
+  assert.ok(f.github.calls.every(call => call.method === 'GET'));
+  assert.equal(
+    run(f.root, ['--git-dir', f.origin, 'rev-parse', 'main']).text,
+    f.baseSha,
+  );
+});
+
+test('publisher access rejects missing workflow run identifiers before API writes', async t => {
+  const f = await accessFixture(t);
+  await assert.rejects(
+    verifyAccess({...accessOptions(f), runId: ''}),
+    /numeric GITHUB_RUN_ID/,
+  );
+  assert.equal(f.github.calls.length, 0);
 });
