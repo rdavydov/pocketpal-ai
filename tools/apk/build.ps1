@@ -84,14 +84,16 @@ try {
     $taskJavaVersion = (& (Join-Path $JavaHome 'bin\java.exe') --version | Out-String)
     if ($LASTEXITCODE -ne 0 -or $taskJavaVersion -notmatch '(openjdk|java) 17\.') { throw 'This workflow requires JDK 17. Android Studio JBR 25 is not a replacement.' }
     Run-Checked $PythonExe @('-c', 'import sys; assert sys.version_info >= (3,9), "Python 3.9+ required"')
-    $taskGradleSource = Get-Content (Join-Path $taskRoot 'android\build.gradle') -Raw
-    $taskSdkValues = @{}
-    foreach ($taskSetting in @('buildToolsVersion','minSdkVersion','compileSdkVersion','targetSdkVersion','ndkVersion')) {
-        $taskMatch = [regex]::Match($taskGradleSource, '(?m)^\s*' + $taskSetting + '\s*=\s*["'']?([\d.]+)')
-        if (-not $taskMatch.Success) { throw "Cannot read $taskSetting from android/build.gradle. Review this wrapper after upstream changes." }
-        $taskSdkValues[$taskSetting] = $taskMatch.Groups[1].Value
+    $taskMetadataOutput = & $taskNode (Join-Path $PSScriptRoot 'android-apk.mjs') metadata --root $taskRoot
+    if ($LASTEXITCODE -ne 0) { throw 'Source metadata check failed. Review the current Android configuration and version files.' }
+    $taskSourceMetadata = ($taskMetadataOutput -join "`n") | ConvertFrom-Json
+    $taskSdkValues = @{
+        buildToolsVersion=$taskSourceMetadata.buildToolsVersion
+        minSdkVersion=[string]$taskSourceMetadata.minSdk
+        compileSdkVersion=[string]$taskSourceMetadata.compileSdk
+        targetSdkVersion=[string]$taskSourceMetadata.targetSdk
+        ndkVersion=$taskSourceMetadata.ndkVersion
     }
-    if ($taskSdkValues.minSdkVersion -ne '24') { throw 'Upstream changed minSdk. This Android 7 workflow requires API 24; review compatibility before building.' }
     $taskBuildTools = Join-Path $SdkRoot ('build-tools\' + $taskSdkValues.buildToolsVersion)
     Require-File (Join-Path $taskBuildTools 'aapt.exe') 'Install the build-tools version from android/build.gradle in Android Studio SDK Manager.'
     Require-File (Join-Path $SdkRoot ('ndk\' + $taskSdkValues.ndkVersion + '\toolchains\llvm\prebuilt\windows-x86_64\bin\clang.exe')) 'Install the pinned NDK in Android Studio SDK Manager.'
@@ -132,15 +134,11 @@ try {
     $env:E2E_BUILD = 'false'
     $env:ORG_GRADLE_PROJECT_rnllamaBuildFromSource = 'true'
     $env:CMAKE_BUILD_PARALLEL_LEVEL = '4'
-    $taskAppGradle = Get-Content (Join-Path $taskRoot 'android\app\build.gradle') -Raw
-    $taskPackageMatch = [regex]::Match($taskAppGradle, '(?m)^\s*applicationId\s*(?:=\s*)?["'']([^"'']+)["'']')
-    if (-not $taskPackageMatch.Success) { throw 'Cannot read the current Android applicationId.' }
-    $taskExpectedPackage = $taskPackageMatch.Groups[1].Value
-    [xml]$taskAndroidStrings = Get-Content (Join-Path $taskRoot 'android\app\src\main\res\values\strings.xml') -Raw
-    $taskAppLabel = $taskAndroidStrings.SelectSingleNode('/resources/string[@name="app_name"]')
-    if (-not $taskAppLabel -or -not $taskAppLabel.InnerText.Trim()) { throw 'Cannot read the current Android app_name resource.' }
-    $taskExpectedAppName = $taskAppLabel.InnerText
-    $taskVerifyParams = @{ReportDir=$taskLogDir; SdkRoot=$SdkRoot; JavaHome=$JavaHome; PythonExe=$PythonExe; GitRoot=$taskGitRoot; ExpectedTargetSdk=[int]$taskSdkValues.targetSdkVersion; ExpectedPackageName=$taskExpectedPackage; ExpectedAppName=$taskExpectedAppName}
+    $taskExpectedPackage = $taskSourceMetadata.package
+    $taskExpectedAppName = $taskSourceMetadata.appName
+    $taskExpectedVersion = $taskSourceMetadata.versionName
+    $taskExpectedCode = $taskSourceMetadata.versionCode
+    $taskVerifyParams = @{ReportDir=$taskLogDir; SdkRoot=$SdkRoot; JavaHome=$JavaHome; PythonExe=$PythonExe; GitRoot=$taskGitRoot; ExpectedTargetSdk=[int]$taskSdkValues.targetSdkVersion; ExpectedPackageName=$taskExpectedPackage; ExpectedAppName=$taskExpectedAppName; ExpectedVersionName=$taskExpectedVersion; ExpectedVersionCode=$taskExpectedCode}
     if ($VerifyApk) {
         & (Join-Path $PSScriptRoot 'verify-apk.ps1') -ApkPath ([IO.Path]::GetFullPath($VerifyApk)) @taskVerifyParams
         if (-not $?) { throw 'APK verification failed.' }
@@ -148,15 +146,6 @@ try {
         return
     }
 
-    $taskVersionMatch = [regex]::Match($taskAppGradle, '(?m)^\s*versionName\s*(?:=\s*)?["'']([^"'']+)["'']')
-    $taskCodeMatch = [regex]::Match($taskAppGradle, '(?m)^\s*versionCode\s*(?:=\s*)?(\d+)')
-    if (-not $taskVersionMatch.Success -or -not $taskCodeMatch.Success) { throw 'Cannot read the current Android versionName/versionCode. Review the updated app Gradle configuration.' }
-    $taskExpectedVersion = $taskVersionMatch.Groups[1].Value
-    $taskExpectedCode = $taskCodeMatch.Groups[1].Value
-    $taskPackageJson = Get-Content (Join-Path $taskRoot 'package.json') -Raw | ConvertFrom-Json
-    if ($taskPackageJson.version -ne $taskExpectedVersion) { throw "Version mismatch: package.json=$($taskPackageJson.version), Android=$taskExpectedVersion. Update the repository version files consistently." }
-    $taskVerifyParams.ExpectedVersionName = $taskExpectedVersion
-    $taskVerifyParams.ExpectedVersionCode = $taskExpectedCode
     if (-not $CheckOnly) {
         # Active packages always live in the root node_modules. Only the download
         # cache is temporary; even failed builds remove it in finally.

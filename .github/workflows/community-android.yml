@@ -1,0 +1,201 @@
+name: Community APK
+
+on:
+  workflow_call:
+    inputs:
+      source_ref:
+        required: true
+        type: string
+      candidate_artifact:
+        default: ''
+        type: string
+      artifact_name:
+        default: community-apk
+        type: string
+      run_quality:
+        default: true
+        type: boolean
+    outputs:
+      artifact_name:
+        value: ${{ jobs.build.outputs.artifact_name }}
+      source_sha:
+        value: ${{ jobs.build.outputs.source_sha }}
+      version:
+        value: ${{ jobs.build.outputs.version }}
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    if: github.event_name == 'workflow_dispatch' || inputs.run_quality
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: inputs.candidate_artifact != ''
+        with:
+          name: ${{ inputs.candidate_artifact }}
+          path: ${{ runner.temp }}/candidate
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22.22.0'
+      - name: Restore the exact prepared candidate
+        if: inputs.candidate_artifact != ''
+        run: node tools/apk/community-release.mjs restore --root . --input "$RUNNER_TEMP/candidate"
+      - name: Install locked JavaScript dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install --yes --no-install-recommends zip unzip
+          npm install --global yarn@1.22.22
+          yarn install --frozen-lockfile --ignore-scripts --production=false
+          node node_modules/patch-package/index.js --error-on-fail
+      - name: Lint, typecheck and test
+        run: |
+          yarn lint
+          yarn typecheck
+          yarn test --runInBand
+          find tools/apk -name '*.test.mjs' -print0 | xargs -0 node --test
+
+  build:
+    needs: quality
+    if: ${{ !cancelled() && (needs.quality.result == 'success' || needs.quality.result == 'skipped') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    outputs:
+      artifact_name: ${{ steps.metadata.outputs.artifact_name }}
+      source_sha: ${{ steps.metadata.outputs.source_sha }}
+      version: ${{ steps.metadata.outputs.version }}
+    env:
+      RNLLAMA_SKIP_POSTINSTALL: '1'
+      PLUS_STORE_GATE: 'false'
+      E2E_BUILD: 'false'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Reserve space for the native toolchain
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /opt/ghc /opt/hostedtoolcache
+          sudo apt-get update -qq
+          sudo apt-get install --yes --no-install-recommends ninja-build unzip
+          df -h /
+          available=$(df --output=avail -k / | tail -1)
+          test "$available" -ge 20971520 || { echo '::error::Need at least 20 GiB free for the native build'; exit 1; }
+          echo "GRADLE_USER_HOME=$RUNNER_TEMP/gradle-home" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22.22.0'
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: inputs.candidate_artifact != ''
+        with:
+          name: ${{ inputs.candidate_artifact }}
+          path: ${{ runner.temp }}/candidate
+      - name: Restore the exact prepared candidate
+        if: inputs.candidate_artifact != ''
+        run: node tools/apk/community-release.mjs restore --root . --input "$RUNNER_TEMP/candidate"
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Read source metadata
+        id: metadata
+        env:
+          ARTIFACT_NAME: ${{ inputs.artifact_name || 'community-apk' }}
+        run: |
+          node tools/apk/android-apk.mjs metadata > "$RUNNER_TEMP/android-metadata.json"
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import {execFileSync} from 'node:child_process';
+          const m = JSON.parse(fs.readFileSync(`${process.env.RUNNER_TEMP}/android-metadata.json`, 'utf8'));
+          const sha = execFileSync('git', ['rev-parse', 'HEAD'], {encoding:'utf8'}).trim();
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `version=${m.versionName}\nsource_sha=${sha}\nartifact_name=${process.env.ARTIFACT_NAME}\n`);
+          NODE
+      - name: Install the SDK versions declared by the source
+        run: |
+          read -r platform tools ndk < <(node -e "const m=require(process.env.RUNNER_TEMP+'/android-metadata.json'); console.log(m.compileSdk,m.buildToolsVersion,m.ndkVersion)")
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "platforms;android-$platform" "build-tools;$tools" "ndk;$ndk" 'cmake;3.22.1'
+          npm install --global yarn@1.22.22
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/yarn
+            ${{ runner.temp }}/gradle-home/caches
+            ${{ runner.temp }}/gradle-home/wrapper
+          key: community-linux-${{ runner.arch }}-${{ hashFiles('yarn.lock', 'patches/**', 'android/gradle/wrapper/gradle-wrapper.properties', 'android/build.gradle') }}
+          restore-keys: community-linux-${{ runner.arch }}-
+      - name: Set up the pinned Hexagon SDK
+        uses: ./.github/actions/setup-hexagon-sdk
+      - name: Build and verify the standalone APK
+        run: bash tools/apk/build-linux.sh build/apk/ci
+      - name: Retain the verified APK
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ inputs.artifact_name || 'community-apk' }}
+          path: build/apk/ci/
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+      - name: Retain diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: community-build-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/apk/ci/logs/
+            build/apk/ci/verification-build/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  smoke:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22.22.0'
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.artifact_name || 'community-apk' }}
+          path: ${{ runner.temp }}/apk
+      - name: Enable KVM for the hosted runner
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Install and launch the same production APK
+        uses: ReactiveCircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          cores: 2
+          ram-size: 2048M
+          emulator-boot-timeout: 300
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot
+          script: node tools/apk/smoke-android.mjs --apk "$RUNNER_TEMP/apk/pocketpal-ai-community-$(node -p "require(process.env.RUNNER_TEMP+'/apk/build-info.json').versionName")-android7.apk" --report-dir "$RUNNER_TEMP/smoke"
+      - name: Retain screenshots and device checks
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ inputs.artifact_name || 'community-apk' }}-smoke
+          path: ${{ runner.temp }}/smoke/
+          retention-days: 7
+          if-no-files-found: error

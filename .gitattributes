@@ -1,0 +1,4 @@
+# Keep Linux CI and Windows checkouts consistent with Prettier and Bash.
+* text=auto eol=lf
+*.cmd text eol=crlf
+*.bat text eol=crlf

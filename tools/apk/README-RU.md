@@ -2,6 +2,8 @@
 
 [PocketPal AI Community](../../COMMUNITY.md) — неофициальный Android-форк PocketPal AI. Имя приложения: **PocketPal AI Community**, установленный пакет: **`io.github.rdavydov.pocketpalai`**. Префикс соответствует обратной записи домена `rdavydov.github.io`.
 
+Сборка на серверах GitHub, ручное скачивание Actions-артефакта и автоматический выпуск новых upstream-версий описаны в [CI-README-RU.md](CI-README-RU.md). Локальная Windows-команда ниже сохраняется.
+
 Из корня репозитория в Windows PowerShell или cmd:
 
 ```powershell
