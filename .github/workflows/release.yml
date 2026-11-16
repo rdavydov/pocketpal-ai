@@ -19,7 +19,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: community-release-${{ github.repository }}${{ inputs.mode == 'verify-access' && '-access-check' || '' }}
+  group: community-release-${{ github.repository }}${{ github.event.inputs.mode == 'verify-access' && format('-access-{0}', github.run_id) || '' }}
   cancel-in-progress: false
 
 jobs:
