@@ -844,6 +844,19 @@ async function tagCommit(github, tag) {
   return requireSha(object.sha);
 }
 
+async function releaseForTag(github, tag) {
+  // The by-tag endpoint documents published releases only. Authenticated listing
+  // is needed to find an unfinished draft and resume it instead of creating one.
+  const matching = (await github.releases()).filter(
+    release => release.tag_name === tag,
+  );
+  if (matching.length > 1)
+    throw new Error(
+      `More than one GitHub release uses ${tag}; refusing an ambiguous release.`,
+    );
+  return matching[0] || null;
+}
+
 export async function publishRelease({
   root,
   candidate,
@@ -869,12 +882,7 @@ export async function publishRelease({
     path.resolve(artifacts),
     path.resolve(smoke),
   );
-  let existing = await github.request(
-    'GET',
-    `repos/${REPOSITORY}/releases/tags/${encodeURIComponent(state.tag)}`,
-    undefined,
-    {allow404: true},
-  );
+  let existing = await releaseForTag(github, state.tag);
   const oldTag = await tagCommit(github, state.tag);
   if (oldTag && oldTag !== state.candidateSha)
     throw new Error(
@@ -891,11 +899,11 @@ export async function publishRelease({
       tag: state.tag,
     };
   }
-  const main = await github.request(
+  const mainRef = await github.request(
     'GET',
     `repos/${REPOSITORY}/git/ref/heads/main`,
   );
-  const mainSha = requireSha(main.object.sha);
+  const mainSha = requireSha(mainRef.object.sha);
   if (
     state.mode === 'candidate' &&
     mainSha !== state.baseSha &&
@@ -1109,11 +1117,11 @@ export async function verifyAccess({
   let operationError;
   const cleanupErrors = [];
   try {
-    const main = await github.request(
+    const mainRef = await github.request(
       'GET',
       `repos/${REPOSITORY}/git/ref/heads/main`,
     );
-    const mainSha = requireSha(main.object.sha);
+    const mainSha = requireSha(mainRef.object.sha);
     if (
       git(root, ['cat-file', '-e', `${mainSha}^{commit}`], {allowFailure: true})
         .status !== 0
@@ -1136,12 +1144,7 @@ export async function verifyAccess({
         '.github/workflows/',
       ]).text,
     );
-    const prior = await github.request(
-      'GET',
-      `repos/${REPOSITORY}/releases/tags/${temporaryTag}`,
-      undefined,
-      {allow404: true},
-    );
+    const prior = await releaseForTag(github, temporaryTag);
     if (prior)
       throw new Error(
         'Temporary access-check release name is already in use; refusing to reuse it.',
@@ -1292,12 +1295,7 @@ export async function verifyAccess({
             throw new Error(
               'Temporary tag was not created by this draft or changed; it will not be deleted.',
             );
-          const currentRelease = await github.request(
-            'GET',
-            `repos/${REPOSITORY}/releases/tags/${temporaryTag}`,
-            undefined,
-            {allow404: true},
-          );
+          const currentRelease = await releaseForTag(github, temporaryTag);
           if (currentRelease)
             throw new Error(
               'A release still uses the temporary tag; refusing to delete the tag.',

@@ -234,6 +234,7 @@ class FakeGitHub {
       endpoint.startsWith(`repos/${REPOSITORY}/releases/tags/`)
     )
       return this.release &&
+        !this.release.draft &&
         decodeURIComponent(endpoint.split('/').at(-1)) === this.release.tag_name
         ? structuredClone(this.release)
         : null;
@@ -618,6 +619,14 @@ test('failed upload recovers pending exact tag before considering a newer upstre
   );
   assert.equal(f.github.release.draft, true);
   assert.equal(f.github.release.assets.length, 1);
+  assert.equal(
+    await f.github.request(
+      'GET',
+      `repos/${REPOSITORY}/releases/tags/${state.tag}`,
+    ),
+    null,
+    'A draft is intentionally hidden by the published-only by-tag endpoint',
+  );
   const recoveryRoot = await cloneTrusted(f, 'recovery');
   const recoveryOutput = path.join(f.temporary, 'recovery-candidate');
   f.github.latest = {...f.github.latest, tag_name: 'v9.0.0'};
@@ -646,7 +655,17 @@ test('failed upload recovers pending exact tag before considering a newer upstre
     remoteUrl: f.origin,
   });
   assert.equal(finished.status, 'published');
+  assert.equal(f.github.release.id, 2, 'Recovery must resume the same draft');
   assert.equal(f.github.release.assets.length, 4);
+  assert.equal(
+    f.github.calls.filter(
+      call =>
+        call.method === 'POST' &&
+        call.endpoint === `repos/${REPOSITORY}/releases`,
+    ).length,
+    0,
+    'Recovery must not create another draft',
+  );
   assert.equal(
     f.github.calls.filter(call => call.upload?.endsWith('.apk')).length,
     0,
@@ -829,6 +848,14 @@ test('publisher access never reuses or deletes an unrelated existing draft', asy
     body: 'Unrelated draft',
     assets: [],
   };
+  assert.equal(
+    await f.github.request(
+      'GET',
+      'repos/' + REPOSITORY + '/releases/tags/community-ci-check-12345678-2',
+    ),
+    null,
+    'The existing draft is not discoverable through the by-tag endpoint',
+  );
   await assert.rejects(verifyAccess(accessOptions(f)), /already in use/);
   assert.equal(f.github.release.body, 'Unrelated draft');
   assert.ok(f.github.calls.every(call => call.method === 'GET'));
@@ -836,6 +863,41 @@ test('publisher access never reuses or deletes an unrelated existing draft', asy
     run(f.root, ['--git-dir', f.origin, 'rev-parse', 'main']).text,
     f.baseSha,
   );
+});
+
+test('publisher stops on duplicate release tags before promoting main', async t => {
+  const f = await fixture(t);
+  const state = await prepare(f);
+  const a = await artifacts(f, state);
+  const trusted = await cloneTrusted(f);
+  const duplicate = {
+    id: 2,
+    tag_name: state.tag,
+    draft: true,
+    prerelease: false,
+  };
+  f.github.releases = async () => [
+    f.github.published,
+    duplicate,
+    {...duplicate, id: 3},
+  ];
+  await assert.rejects(
+    publishRelease({
+      root: trusted,
+      candidate: f.output,
+      artifacts: a.output,
+      smoke: a.smoke,
+      appToken: 'test-token',
+      github: f.github,
+      remoteUrl: f.origin,
+    }),
+    /More than one GitHub release/,
+  );
+  assert.equal(
+    run(f.root, ['--git-dir', f.origin, 'rev-parse', 'main']).text,
+    f.baseSha,
+  );
+  assert.ok(f.github.calls.every(call => call.method === 'GET'));
 });
 
 test('publisher access rejects missing workflow run identifiers before API writes', async t => {
