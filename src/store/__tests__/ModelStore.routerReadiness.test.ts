@@ -6,6 +6,12 @@ import {streamChatCompletion} from '../../api/openai';
 import type {ServerType} from '../../utils/serverTypes';
 import {RemoteModelRequestWithdrawnError} from '../../utils/errors';
 
+// The imported singleton also starts its preset upgrade in the background.
+// Remote readiness tests must not leave a real rules fetch running past teardown.
+jest.mock('../../services/deviceRules/rules', () => ({
+  fetchRules: jest.fn().mockResolvedValue(null),
+}));
+
 jest.mock('../ServerStore', () => ({
   serverStore: {
     getApiKey: jest.fn().mockResolvedValue(undefined),
