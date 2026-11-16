@@ -2,3 +2,7 @@
 * text=auto eol=lf
 *.cmd text eol=crlf
 *.bat text eol=crlf
+
+# Preserve byte-exact upstream CRLF blobs; converting them dirties a fresh clone.
+android/gradlew.bat -text
+jest/fixtures/router-wire/*.txt -text
