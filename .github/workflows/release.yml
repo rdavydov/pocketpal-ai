@@ -119,7 +119,7 @@ jobs:
 
   publish:
     needs: [prepare, android]
-    if: ${{ github.repository == 'rdavydov/pocketpal-ai' && github.ref == 'refs/heads/main' && needs.prepare.result == 'success' && needs.prepare.outputs.mode != 'no-update' && (github.event_name == 'schedule' || inputs.mode == 'check') }}
+    if: ${{ !cancelled() && github.repository == 'rdavydov/pocketpal-ai' && github.ref == 'refs/heads/main' && needs.prepare.result == 'success' && needs.android.result == 'success' && needs.prepare.outputs.mode != 'no-update' && (github.event_name == 'schedule' || inputs.mode == 'check') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
