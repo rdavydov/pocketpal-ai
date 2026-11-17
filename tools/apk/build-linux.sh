@@ -73,12 +73,20 @@ gradle.beforeProject { project ->
 }
 GRADLE
 
-bash android/gradlew -p "$task_root/android" assembleProdRelease \
-  --init-script "$task_output/ci.init.gradle" --no-daemon --max-workers=4 --console=plain --info \
-  '-Dorg.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m' \
-  -Pkotlin.compiler.execution.strategy=in-process \
-  -PrnllamaBuildFromSource=true "-PrnllamaVariants=$task_variants" \
-  -PRNSpeech_phononAbis=arm64-v8a,x86_64 -PreactNativeArchitectures=arm64-v8a,x86_64 \
+task_gradle_args=(
+  --init-script "$task_output/ci.init.gradle" --no-daemon --max-workers=4 --console=plain --info --stacktrace
+  '-Dorg.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=1536m'
+  -Pkotlin.compiler.execution.strategy=in-process
+  -PrnllamaBuildFromSource=true "-PrnllamaVariants=$task_variants"
+  -PRNSpeech_phononAbis=arm64-v8a,x86_64 -PreactNativeArchitectures=arm64-v8a,x86_64
+)
+# A cold multi-module Kotlin build needs more class metadata than the incremental
+# Windows build. Compile it first so compiler failures precede the expensive C++
+# build; assemble then reuses these outputs with exactly the same configuration.
+bash android/gradlew -p "$task_root/android" :app:compileProdReleaseKotlin \
+  "${task_gradle_args[@]}" 2>&1 | tee "$task_output/logs/kotlin-preflight.log"
+
+bash android/gradlew -p "$task_root/android" assembleProdRelease "${task_gradle_args[@]}" \
   2>&1 | tee "$task_output/logs/gradle.log"
 grep -qF "Building rnllama variants: $task_variants" "$task_output/logs/gradle.log"
 task_source_apk="$task_root/android/app/build/outputs/apk/prod/release/app-prod-release.apk"
