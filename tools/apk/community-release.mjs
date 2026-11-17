@@ -19,6 +19,8 @@ const OWNED_FILES = [
   'COMMUNITY.md',
   'build-apk.cmd',
   'android/app/debug.keystore',
+  // The store release contract is different from this fork's APK workflow.
+  'scripts/__tests__/release-plus-mode.test.js',
 ];
 const GRADLE = 'android/app/build.gradle';
 const STRINGS = 'android/app/src/main/res/values/strings.xml';

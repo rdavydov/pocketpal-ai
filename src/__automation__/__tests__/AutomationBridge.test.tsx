@@ -3,6 +3,12 @@ import {render} from '@testing-library/react-native';
 
 import {AutomationBridge} from '../AutomationBridge';
 
+// Adapter imports initialize stores; keep their background rules upgrade offline
+// so a network response cannot resume after this structural test tears down.
+jest.mock('../../services/deviceRules/rules', () => ({
+  fetchRules: jest.fn().mockResolvedValue(null),
+}));
+
 describe('AutomationBridge', () => {
   const origE2E = (global as any).__E2E__;
 

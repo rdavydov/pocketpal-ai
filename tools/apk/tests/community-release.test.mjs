@@ -19,6 +19,8 @@ import {
   verifyAccess,
 } from '../community-release.mjs';
 
+const releaseModeTest = 'scripts/__tests__/release-plus-mode.test.js';
+
 function run(root, args, allowFailure = false) {
   const result = spawnSync('git', args, {
     cwd: root,
@@ -96,6 +98,7 @@ async function fixture(t, {unknownConflict = false, nextCode = 2} = {}) {
       applyIdentity(await fs.readFile(path.join(root, name), 'utf8'), name),
     );
   await write(root, '.github/workflows/ci.yml', 'name: Community workflow\n');
+  await write(root, releaseModeTest, '// Community APK expectations\n');
   await write(root, 'tools/apk/owned.txt', 'keep fork tools\n');
   await write(root, 'COMMUNITY.md', 'fork attribution\n');
   await write(root, 'build-apk.cmd', 'fork entry point\n');
@@ -122,6 +125,7 @@ async function fixture(t, {unknownConflict = false, nextCode = 2} = {}) {
     'name: changed upstream store workflow\n',
   );
   await write(root, 'tools/apk/new-upstream.txt', 'not a fork build tool\n');
+  await write(root, releaseModeTest, '// Upstream store expectations\n');
   await write(
     root,
     'android/app/debug.keystore',
@@ -426,6 +430,10 @@ test('normal merge preserves fork CI, signing key and tools while taking upstrea
   assert.equal(
     await fs.readFile(path.join(f.root, '.github/workflows/ci.yml'), 'utf8'),
     'name: Community workflow\n',
+  );
+  assert.equal(
+    await fs.readFile(path.join(f.root, releaseModeTest), 'utf8'),
+    '// Community APK expectations\n',
   );
   assert.equal(
     await fs.readFile(path.join(f.root, 'android/app/debug.keystore'), 'utf8'),
