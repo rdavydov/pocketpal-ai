@@ -34,6 +34,21 @@ The LLM, speech, chat and model-loading implementation is inherited from the
 upstream project. Models are not included in the APK. After installing the fork,
 download/import a model and configure speech/voice normally.
 
+## Build and release on GitHub
+
+The Community workflows build a standalone APK on Ubuntu, verify it and run the
+same APK in an Android emulator. Manual `build` mode produces a downloadable
+Actions artifact without publishing; scheduled checks prepare newer stable
+upstream releases and publish them only after the checks pass.
+
+See [the Russian CI/CD guide](tools/apk/CI-README-RU.md) for `build`, `check` and
+`preview` modes, artifact retention, recovery and one-time publisher setup.
+Publishing accepts a repository-scoped fine-grained PAT (`COMMUNITY_RELEASE_TOKEN`)
+or GitHub App credentials; the PAT takes priority when present. Neither changes
+the public Android Debug signing certificate used for compatible APK updates.
+Unknown merge conflicts stop the automatic release; existing published assets
+are not overwritten.
+
 ## Build on Windows
 
 Run from the checkout root:

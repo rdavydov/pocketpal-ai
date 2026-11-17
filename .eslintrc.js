@@ -50,12 +50,18 @@ module.exports = {
     'build/',
     'dist/',
     'e2e/',
+    '.build-tools/',
   ],
   rules: {
     'prettier/prettier': 'error',
     'no-restricted-syntax': ['error', AGENT_SETTER, ...SERVER_TYPE_LITERAL],
   },
   overrides: [
+    {
+      files: ['tools/apk/**/*.mjs'],
+      env: {node: true, es2022: true},
+      parserOptions: {ecmaVersion: 2022, sourceType: 'module'},
+    },
     {
       // Build/CI tooling: Node CommonJS, not React Native.
       files: ['scripts/**/*.js'],
