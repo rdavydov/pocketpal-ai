@@ -167,6 +167,8 @@ jobs:
 
   smoke:
     needs: build
+    # A skipped quality job (already run by the caller) must not suppress smoke.
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
