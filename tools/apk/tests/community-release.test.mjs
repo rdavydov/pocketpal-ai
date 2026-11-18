@@ -4,6 +4,8 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
+import {createHash} from 'node:crypto';
+import {fileURLToPath} from 'node:url';
 import {
   APP_NAME,
   PACKAGE,
@@ -166,6 +168,7 @@ class FakeGitHub {
     this.calls = [];
     this.nextAsset = 20;
     this.failUploadOnce = false;
+    this.failPublishOnce = false;
     this.failCreateOnce = false;
     this.failProbeUploadOnce = false;
     this.createDraftTag = false;
@@ -272,18 +275,21 @@ class FakeGitHub {
         this.failProbeUploadOnce = false;
         throw new Error('simulated probe upload failure');
       }
-      if (this.failUploadOnce && options.upload.name === 'build-info.json') {
-        this.failUploadOnce = false;
-        throw new Error('simulated network failure');
-      }
       const asset = {
         id: this.nextAsset++,
         name: options.upload.name,
-        label: options.upload.label,
+        label: options.upload.label ?? null,
         size: options.upload.size,
         state: 'uploaded',
         browser_download_url: `https://github.com/${REPOSITORY}/releases/download/${this.release.tag_name}/${options.upload.name}`,
       };
+      if (this.failUploadOnce) {
+        this.failUploadOnce = false;
+        this.release.assets.push({...asset, size: 0, state: 'starter'});
+        throw new Error('simulated network failure');
+      }
+      const bytes = await fs.readFile(options.upload.file);
+      asset.digest = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
       this.release.assets.push(asset);
       return structuredClone(asset);
     }
@@ -324,7 +330,20 @@ class FakeGitHub {
     }
     if (method === 'GET' && endpoint === `repos/${REPOSITORY}/releases/2`)
       return structuredClone(this.release);
+    if (
+      method === 'PATCH' &&
+      endpoint.startsWith(`repos/${REPOSITORY}/releases/assets/`)
+    ) {
+      const asset = this.release.assets.find(
+        item => item.id === Number(endpoint.split('/').at(-1)),
+      );
+      return structuredClone(Object.assign(asset, body));
+    }
     if (method === 'PATCH' && endpoint === `repos/${REPOSITORY}/releases/2`) {
+      if (this.failPublishOnce && body.draft === false) {
+        this.failPublishOnce = false;
+        throw new Error('simulated draft publication failure');
+      }
       Object.assign(this.release, body);
       return structuredClone(this.release);
     }
@@ -585,7 +604,11 @@ test('successful publication promotes exact source once and never overwrites a p
   const result = await publishRelease(options);
   assert.equal(result.status, 'published');
   assert.equal(f.github.release.draft, false);
-  assert.equal(f.github.release.assets.length, 4);
+  const apkName = 'pocketpal-ai-community-1.1.0-android7.apk';
+  assert.deepEqual(
+    f.github.release.assets.map(({name, label}) => ({name, label})),
+    [{name: apkName, label: null}],
+  );
   assert.equal(
     run(f.root, ['--git-dir', f.origin, 'rev-parse', 'main']).text,
     state.candidateSha,
@@ -596,6 +619,10 @@ test('successful publication promotes exact source once and never overwrites a p
   );
   assert.ok(f.github.release.body.includes('Полный разговор через микрофон'));
   assert.ok(f.github.release.body.includes('**Подпись тестовая:**'));
+  assert.ok(
+    f.github.release.body.includes(`/download/${state.tag}/${apkName})`),
+  );
+  assert.doesNotMatch(f.github.release.body, /smoke\.png/);
   const mutationCount = f.github.calls.filter(
     call => call.method !== 'GET',
   ).length;
@@ -626,7 +653,8 @@ test('failed upload recovers pending exact tag before considering a newer upstre
     /simulated network failure/,
   );
   assert.equal(f.github.release.draft, true);
-  assert.equal(f.github.release.assets.length, 1);
+  const [incompleteApk] = f.github.release.assets;
+  assert.equal(incompleteApk.state, 'starter');
   assert.equal(
     await f.github.request(
       'GET',
@@ -653,7 +681,7 @@ test('failed upload recovers pending exact tag before considering a newer upstre
       call => call.endpoint === `repos/${UPSTREAM}/releases/latest`,
     ),
   );
-  const finished = await publishRelease({
+  const options = {
     root: recoveryRoot,
     candidate: recoveryOutput,
     artifacts: a.output,
@@ -661,10 +689,31 @@ test('failed upload recovers pending exact tag before considering a newer upstre
     appToken: 'test-token',
     github: f.github,
     remoteUrl: f.origin,
-  });
+  };
+  f.github.failPublishOnce = true;
+  await assert.rejects(
+    publishRelease(options),
+    /simulated draft publication failure/,
+  );
+  const [completeApk] = f.github.release.assets;
+  assert.equal(completeApk.state, 'uploaded');
+  assert.notEqual(completeApk.id, incompleteApk.id);
+
+  // Resume a draft left by the previous publisher without uploading the APK again.
+  const legacyLabel = `Community ${state.version}; source ${state.candidateSha}`;
+  completeApk.label = legacyLabel;
+  f.github.release.assets.push(
+    ...['build-info.json', 'runtime-checks.json', 'smoke.png'].map(name => ({
+      id: f.github.nextAsset++,
+      name,
+      label: legacyLabel,
+    })),
+  );
+  f.github.calls = [];
+  const finished = await publishRelease(options);
   assert.equal(finished.status, 'published');
   assert.equal(f.github.release.id, 2, 'Recovery must resume the same draft');
-  assert.equal(f.github.release.assets.length, 4);
+  assert.deepEqual(f.github.release.assets, [{...completeApk, label: ''}]);
   assert.equal(
     f.github.calls.filter(
       call =>
@@ -734,6 +783,25 @@ test('read API errors redact a token rather than exposing response text', async 
     error =>
       error.message.includes('***') && !error.message.includes('secret-value'),
   );
+});
+
+test('APK upload URL omits the optional display label', async () => {
+  const name = 'pocketpal-ai-community-1.1.0-android7.apk';
+  const github = new GitHub('test-token', async (url, {body}) => {
+    body.destroy();
+    assert.deepEqual([...new URL(url).searchParams], [['name', name]]);
+    return {ok: true, status: 201, json: async () => ({name})};
+  });
+  const file = fileURLToPath(import.meta.url);
+  await github.request('POST', '', undefined, {
+    upload: {
+      id: 2,
+      file,
+      name,
+      type: 'application/vnd.android.package-archive',
+      size: (await fs.stat(file)).size,
+    },
+  });
 });
 
 async function accessFixture(t) {

@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
+import {createHash} from 'node:crypto';
 import {createReadStream} from 'node:fs';
 import {fileURLToPath} from 'node:url';
 
@@ -189,9 +190,7 @@ export class GitHub {
     this.fetch = fetchImpl;
   }
   async request(method, endpoint, body, {allow404 = false, upload} = {}) {
-    const url = upload
-      ? `https://uploads.github.com/repos/${REPOSITORY}/releases/${upload.id}/assets?name=${encodeURIComponent(upload.name)}&label=${encodeURIComponent(upload.label)}`
-      : `https://api.github.com/${endpoint}`;
+    let url = `https://api.github.com/${endpoint}`;
     const headers = {
       'User-Agent': 'PocketPal-Community-CI',
       Accept: 'application/vnd.github+json',
@@ -201,6 +200,9 @@ export class GitHub {
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     let payload = body === undefined ? undefined : JSON.stringify(body);
     if (upload) {
+      const query = new URLSearchParams({name: upload.name});
+      if (upload.label) query.set('label', upload.label);
+      url = `https://uploads.github.com/repos/${REPOSITORY}/releases/${upload.id}/assets?${query}`;
       headers['Content-Type'] = upload.type;
       headers['Content-Length'] = String(upload.size);
       payload = createReadStream(upload.file);
@@ -819,13 +821,13 @@ export async function validateArtifactSet(state, artifacts, smoke) {
     header.readUInt32BE(20) < 1
   )
     throw new Error('Missing native PNG screenshot from the smoke test.');
-  return {info, runtime, apk, image};
+  return {info, runtime, apk};
 }
 
 export function releaseNotes(state, info, runtime) {
   const base = `https://github.com/${REPOSITORY}/releases/download/${state.tag}`;
   const upstreamBody = String(state.upstreamBody || '').slice(0, 10000);
-  return `# PocketPal AI Community ${state.version}\n\nНеофициальный форк [PocketPal AI](https://github.com/${UPSTREAM}) — Roman Davydov (rdavydov). Лицензия MIT, авторство оригинала сохранено.\n\n**[Скачать APK](${base}/pocketpal-ai-community-${state.version}-android7.apk)** — ${info.bytes} байт.\n\n## Изменения\n\nОбновлена основа до [PocketPal ${state.version}](${state.upstreamUrl}). Сохранены имя **${APP_NAME}**, отдельный пакет \`${PACKAGE}\`, Windows-сборка одной командой и автоматическая сборка на GitHub. Локальные Plus-функции включены штатной source-build конфигурацией \`PLUS_STORE_GATE=false\`; платные серверные материалы PalsHub не разблокируются.\n\n${upstreamBody ? `<details>\n<summary>Изменения оригинального проекта</summary>\n\n${upstreamBody}\n\n</details>\n\n` : ''}## Установка и подпись\n\nAndroid 7.0/API24+, только 64-битные arm64-v8a и x86_64. Один самостоятельный release APK, Metro не нужен. Модели LLM и речи не включены; загрузите или импортируйте их после установки. Форк устанавливается рядом с оригиналом; автоматического переноса данных между пакетами нет.\n\n**Подпись тестовая:** сохранён публичный \`android/app/debug.keystore\`, alias \`androiddebugkey\`, CN=Android Debug, RSA 2048. Сертификат совпадает с предыдущими Community APK; для обновления должны совпадать пакет и сертификат.\n\n## Проверки\n\nПройдены lint, typecheck, Jest, проверки версии/имени/пакета, сертификата, native payload, Plus и ZIP/ELF 16 KB. Этот же APK установлен и запущен на эмуляторе Android ${runtime.device.api === 35 ? '15/API35' : `API${runtime.device.api}`} x86_64; подтверждена загрузка интерфейса чата. Полный разговор через микрофон, локальная генерация LLM, физический Android 7 и GPU/NPU в этом CI-запуске не проверялись.\n\n[Точные исходники](https://github.com/${REPOSITORY}/tree/${state.candidateSha}) · [Windows README](https://github.com/${REPOSITORY}/blob/${state.candidateSha}/tools/apk/README-RU.md).\n\n<details>\n<summary>Скриншот запуска этой сборки</summary>\n\n![PocketPal AI Community](${base}/smoke.png)\n\n</details>\n\n<!-- pocketpal-community-source:${state.candidateSha} -->\n`;
+  return `# PocketPal AI Community ${state.version}\n\nНеофициальный форк [PocketPal AI](https://github.com/${UPSTREAM}) — Roman Davydov (rdavydov). Лицензия MIT, авторство оригинала сохранено.\n\n**[Скачать APK](${base}/pocketpal-ai-community-${state.version}-android7.apk)** — ${info.bytes} байт.\n\n## Изменения\n\nОбновлена основа до [PocketPal ${state.version}](${state.upstreamUrl}). Сохранены имя **${APP_NAME}**, отдельный пакет \`${PACKAGE}\`, Windows-сборка одной командой и автоматическая сборка на GitHub. Локальные Plus-функции включены штатной source-build конфигурацией \`PLUS_STORE_GATE=false\`; платные серверные материалы PalsHub не разблокируются.\n\n${upstreamBody ? `<details>\n<summary>Изменения оригинального проекта</summary>\n\n${upstreamBody}\n\n</details>\n\n` : ''}## Установка и подпись\n\nAndroid 7.0/API24+, только 64-битные arm64-v8a и x86_64. Один самостоятельный release APK, Metro не нужен. Модели LLM и речи не включены; загрузите или импортируйте их после установки. Форк устанавливается рядом с оригиналом; автоматического переноса данных между пакетами нет.\n\n**Подпись тестовая:** сохранён публичный \`android/app/debug.keystore\`, alias \`androiddebugkey\`, CN=Android Debug, RSA 2048. Сертификат совпадает с предыдущими Community APK; для обновления должны совпадать пакет и сертификат.\n\n## Проверки\n\nПройдены lint, typecheck, Jest, проверки версии/имени/пакета, сертификата, native payload, Plus и ZIP/ELF 16 KB. Этот же APK установлен и запущен на эмуляторе Android ${runtime.device.api === 35 ? '15/API35' : `API${runtime.device.api}`} x86_64; подтверждена загрузка интерфейса чата. Полный разговор через микрофон, локальная генерация LLM, физический Android 7 и GPU/NPU в этом CI-запуске не проверялись.\n\n[Точные исходники](https://github.com/${REPOSITORY}/tree/${state.candidateSha}) · [Windows README](https://github.com/${REPOSITORY}/blob/${state.candidateSha}/tools/apk/README-RU.md).\n\n<!-- pocketpal-community-source:${state.candidateSha} -->\n`;
 }
 
 async function tagCommit(github, tag) {
@@ -972,83 +974,90 @@ export async function publishRelease({
       {name: title, body: notes},
     );
   }
-  const files = [
-    {
-      file: verified.apk,
-      name: path.basename(verified.apk),
-      type: 'application/vnd.android.package-archive',
-    },
-    {
-      file: path.join(artifacts, 'build-info.json'),
-      name: 'build-info.json',
-      type: 'application/json',
-    },
-    {
-      file: path.join(smoke, 'checks.json'),
-      name: 'runtime-checks.json',
-      type: 'application/json',
-    },
-    {file: verified.image, name: 'smoke.png', type: 'image/png'},
-  ];
-  const label = `Community ${state.version}; source ${state.candidateSha}`;
-  for (const file of files) {
-    existing = await github.request(
-      'GET',
-      `repos/${REPOSITORY}/releases/${existing.id}`,
+  const name = path.basename(verified.apk);
+  const size = verified.info.bytes;
+  const hash = createHash('sha256');
+  for await (const chunk of createReadStream(verified.apk)) hash.update(chunk);
+  const digest = `sha256:${hash.digest('hex')}`;
+  const matchesApk = asset =>
+    asset?.state === 'uploaded' &&
+    asset.name === name &&
+    asset.size === size &&
+    (!asset.digest || asset.digest === digest);
+
+  const releaseEndpoint = `repos/${REPOSITORY}/releases/${existing.id}`;
+  existing = await github.request('GET', releaseEndpoint);
+  if (!existing.draft)
+    throw new Error(
+      'Draft was published before asset upload; no published asset will be changed.',
     );
-    if (!existing.draft)
-      throw new Error(
-        'Draft was published while assets were uploading; no published asset will be changed.',
-      );
-    const size = (await fs.stat(file.file)).size;
-    let asset = existing.assets?.find(item => item.name === file.name);
-    if (
-      asset &&
-      (asset.state !== 'uploaded' ||
-        asset.size !== size ||
-        asset.label !== label)
-    ) {
-      // Replacing an incomplete/different build is allowed only while unpublished.
-      await github.request(
-        'DELETE',
-        `repos/${REPOSITORY}/releases/assets/${asset.id}`,
-      );
-      asset = null;
-    }
-    if (!asset)
-      asset = await github.request('POST', '', undefined, {
-        upload: {...file, size, id: existing.id, label},
-      });
-    if (
-      asset.state !== 'uploaded' ||
-      asset.size !== size ||
-      asset.name !== file.name
-    )
-      throw new Error(`Release upload failed for ${file.name}.`);
-  }
-  existing = await github.request(
-    'GET',
-    `repos/${REPOSITORY}/releases/${existing.id}`,
+
+  // Only remove reports/screenshots uploaded by the previous publisher to this draft.
+  const draftAssets = existing.assets || [];
+  const legacyLabel = `Community ${state.version}; source ${state.candidateSha}`;
+  const legacyNames = ['build-info.json', 'runtime-checks.json', 'smoke.png'];
+  const legacyAssets = draftAssets.filter(
+    asset => asset.label === legacyLabel && legacyNames.includes(asset.name),
   );
+  const apks = draftAssets.filter(
+    asset =>
+      asset.name === name && (!asset.label || asset.label === legacyLabel),
+  );
+  if (
+    apks.length > 1 ||
+    apks.length + legacyAssets.length !== draftAssets.length
+  )
+    throw new Error('Unexpected assets on the Community draft.');
+
+  let [asset] = apks;
+  const remove = [...legacyAssets];
+  // Reuse an existing APK only if its bytes match this run's verified build.
+  if (asset && (!matchesApk(asset) || asset.digest !== digest)) {
+    remove.push(asset);
+    asset = undefined;
+  }
+  for (const item of remove)
+    await github.request(
+      'DELETE',
+      `repos/${REPOSITORY}/releases/assets/${item.id}`,
+    );
+  if (asset?.label === legacyLabel)
+    asset = await github.request(
+      'PATCH',
+      `repos/${REPOSITORY}/releases/assets/${asset.id}`,
+      {label: ''},
+    );
+  else if (!asset)
+    asset = await github.request('POST', '', undefined, {
+      upload: {
+        id: existing.id,
+        file: verified.apk,
+        name,
+        size,
+        type: 'application/vnd.android.package-archive',
+      },
+    });
+  if (!matchesApk(asset) || asset.label)
+    throw new Error(`Release APK verification failed for ${name}.`);
+
+  existing = await github.request('GET', releaseEndpoint);
   if (!existing.draft)
     throw new Error(
       'Draft was published before final asset verification; refusing to modify it.',
     );
-  for (const file of files) {
-    const asset = existing.assets?.find(item => item.name === file.name);
-    if (
-      !asset ||
-      asset.state !== 'uploaded' ||
-      asset.size !== (await fs.stat(file.file)).size ||
-      asset.label !== label
-    )
-      throw new Error('Final draft asset verification failed.');
-  }
-  const published = await github.request(
-    'PATCH',
-    `repos/${REPOSITORY}/releases/${existing.id}`,
-    {draft: false, prerelease: false, make_latest: 'true'},
-  );
+  const [finalAsset] = existing.assets || [];
+  if (
+    existing.assets?.length !== 1 ||
+    finalAsset.id !== asset.id ||
+    !matchesApk(finalAsset) ||
+    finalAsset.label
+  )
+    throw new Error('Final draft APK verification failed.');
+  const published = await github.request('PATCH', releaseEndpoint, {
+    draft: false,
+    prerelease: false,
+    make_latest: 'true',
+  });
   if (
     published.draft ||
     published.prerelease ||
